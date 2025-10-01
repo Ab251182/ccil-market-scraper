@@ -5,165 +5,72 @@ import Papa from "papaparse";
 
 const START_URL = "https://www.ccilindia.com/market-watch";
 
-// Keep these three tabs to save run time/cost.
-// You can add WI / OddLot later by uncommenting.
+// Only 3 tabs to save time (add WI / OddLot later if needed)
 const TABS = [
   { labels: ["CG Mkt. Watch","Central Government","G-Sec"], segment: "Central Government Market Watch" },
-  { labels: ["SG Mkt. Watch","State Government","SDL"],     segment: "State Government Market Watch" },
-  { labels: ["T-Bills Mkt. Watch","T Bills","Treasury Bills"], segment: "T-Bills Market Watch" },
-  // { labels: ["WI Mkt. Watch","When-Issued","WI"], segment: "WI Market Watch" },
-  // { labels: ["OddLot","Odd Lot","Oddlot"],        segment: "Odd Lot" },
+  { labels: ["SG Mkt. Watch","State Government","SDL"], segment: "State Government Market Watch" },
+  { labels: ["T-Bills Mkt. Watch","T Bills","Treasury Bills"], segment: "T-Bills Market Watch" }
 ];
 
-const OUT_DIR = "docs/data"; // publish with GitHub Pages
+const OUT_DIR = "docs/data";
 
-function slug(s){ return (s||"").toLowerCase().replace(/\s+/g,"_").replace(/[^\w_]/g,""); }
+// Helper: clean filename
+function slug(s) {
+  return (s||"").toLowerCase().replace(/\s+/g,"_").replace(/[^\w_]/g,"");
+}
 
+// Click element by text
 async function clickByText(page, texts) {
   for (const t of texts) {
-    try { await page.getByText(t, { exact:false }).first().click({ timeout: 2500 }); return true; } catch {}
-    try { await page.locator(`text=${t}`).first().click({ timeout: 2500 }); return true; } catch {}
+    const el = page.locator(`text=${t}`).first();
+    if (await el.count()) {
+      await el.click();
+      await page.waitForTimeout(1000);
+      return true;
+    }
   }
   return false;
 }
 
-async function waitForAnyTable(page){
-  try { await page.waitForSelector("table", { timeout: 25000 }); } catch {}
-  await page.waitForTimeout(700);
-}
-
-async function chooseMaxPageSize(page){
-  try {
-    const sel = page.locator('select[name$="_length"], .dataTables_length select').first();
-    if (await sel.count()) {
-      await sel.selectOption({ label: "100" }).catch(()=>{});
-      await sel.selectOption("100").catch(()=>{});
-      await page.waitForTimeout(300);
-    }
-  } catch {}
-}
-
-async function extractVisibleTables(page, segmentLabel) {
-  const rows = await page.evaluate((segmentLabel) => {
-    const slug = (s)=> (s||"").toLowerCase().replace(/\s+/g,"_").replace(/[^\w_]/g,"");
-    function headersOf(tbl){
-      const ths = tbl.querySelectorAll("thead th");
-      if (ths && ths.length) return Array.from(ths).map(x => x.innerText.trim());
-      const first = tbl.querySelector("tr");
-      if (!first) return [];
-      return Array.from(first.querySelectorAll("th,td")).map(x => x.innerText.trim());
-    }
-    function labelFor(tbl){
-      let el = tbl;
-      for (let i=0;i<6 && el;i++){
-        el = el.previousElementSibling;
-        if (!el) break;
-        const t = (el.textContent||"").trim();
-        if (/Market Watch/i.test(t)) return t;
-      }
-      return segmentLabel || "Unknown";
-    }
-    function rowsOf(tbl,label){
-      const hdrs = headersOf(tbl);
-      let body = Array.from(tbl.querySelectorAll("tbody tr"));
-      if (!body.length) body = Array.from(tbl.querySelectorAll("tr")).slice(1);
-      const out=[];
-      for (const tr of body){
-        const cells = Array.from(tr.querySelectorAll("td")).map(td => td.innerText.trim());
-        if (!cells.length) continue;
-        const rec = {};
-        hdrs.forEach((h,i)=>{ rec[slug(h || `col_${i+1}`)] = cells[i] ?? ""; });
-        rec.segment_label = label;
-        out.push(rec);
-      }
-      return out;
-    }
-    const tables = Array.from(document.querySelectorAll("table"))
-      .filter(t => t.offsetParent !== null && t.querySelectorAll("tr").length > 1);
-    let out = [];
-    for (const t of tables) out = out.concat(rowsOf(t, labelFor(t)));
-    return out;
-  }, segmentLabel);
-  return rows || [];
-}
-
-async function paginateAndExtract(page, segmentLabel) {
-  let total = [];
-  for (let safe=0; safe<10; safe++){      // hard stop after 10 pages
-    await waitForAnyTable(page);
-    await chooseMaxPageSize(page);
-    total = total.concat(await extractVisibleTables(page, segmentLabel));
-
-    const hasNext = await page.evaluate(() => {
-      const cand = document.querySelector(
-        '.dataTables_paginate .next:not(.disabled), .paginate_button.next:not(.disabled)'
-      );
-      return !!(cand && cand.offsetParent !== null);
-    });
-    if (!hasNext) break;
-
-    try {
-      const link = page.locator(
-        '.dataTables_paginate .next:not(.disabled) a, .paginate_button.next:not(.disabled) a'
-      ).first();
-      if (await link.count()) await link.click({ timeout: 1500 });
-      else await page.locator(
-        '.dataTables_paginate .next:not(.disabled), .paginate_button.next:not(.disabled)'
-      ).first().click({ timeout: 1500 });
-    } catch { break; }
-
-    await page.waitForTimeout(500);
-  }
-  return total;
-}
-
-async function run() {
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
-
-  // cut bandwidth (cheaper & faster)
-  await page.route('**/*', route => {
-    const t = route.request().resourceType();
-    return ['image','font','stylesheet','media'].includes(t) ? route.abort() : route.continue();
+// Extract table rows
+async function extractTable(page) {
+  return await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll("table.dataTable tbody tr"));
+    return rows.map(r => Array.from(r.querySelectorAll("td")).map(td => td.innerText.trim()));
   });
+}
 
-  await page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await waitForAnyTable(page);
+// Scrape one segment
+async function scrapeSegment(browser, tab) {
+  const page = await browser.newPage();
+  await page.goto(START_URL, { waitUntil: "domcontentloaded" });
 
-  let all = [];
+  const clicked = await clickByText(page, tab.labels);
+  if (!clicked) return [];
+
+  await page.waitForTimeout(2000);
+
+  const data = await extractTable(page);
+  return data;
+}
+
+(async () => {
+  const browser = await chromium.launch();
+  const allResults = {};
+
   for (const tab of TABS) {
-    await clickByText(page, tab.labels);
-    const rows = await paginateAndExtract(page, tab.segment);
-    if (rows.length === 0) {
-      // fallback: at least get the current page
-      all = all.concat(await extractVisibleTables(page, tab.segment));
-    } else {
-      all = all.concat(rows);
-    }
+    const rows = await scrapeSegment(browser, tab);
+    allResults[tab.segment] = rows;
   }
 
   await browser.close();
 
-  // ensure output dirs exist
-  fs.mkdirSync(OUT_DIR, { recursive: true });
-  fs.writeFileSync("docs/index.html",
-`<html><body>
-<h3>CCIL Scraper – latest</h3>
-<ul>
-<li><a href="data/ccil_latest.csv">data/ccil_latest.csv</a></li>
-<li><a href="data/ccil_latest.json">data/ccil_latest.json</a></li>
-</ul></body></html>`);
+  if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
+  const csv = Papa.unparse(Object.entries(allResults).flatMap(([seg, rows]) =>
+    rows.map(r => [seg, ...r])
+  ));
 
-  // save JSON + CSV (latest + timestamped)
-  const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  fs.writeFileSync(`${OUT_DIR}/ccil_latest.json`, JSON.stringify(all, null, 2));
-  fs.writeFileSync(`${OUT_DIR}/ccil_${ts}.json`, JSON.stringify(all, null, 2));
-
-  const csv = Papa.unparse(all);
-  fs.writeFileSync(`${OUT_DIR}/ccil_latest.csv`, csv);
-  fs.writeFileSync(`${OUT_DIR}/ccil_${ts}.csv`, csv);
-
-  console.log(`Saved ${all.length} rows.`);
-}
-
-run().catch(e => { console.error(e); process.exit(1); });
+  const outFile = `${OUT_DIR}/ccil-data.csv`;
+  fs.writeFileSync(outFile, csv);
+  console.log(`✅ Data saved to ${outFile}`);
+})();
