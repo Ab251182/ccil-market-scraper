@@ -1,0 +1,13 @@
+{
+  "name": "ccil-market-scraper",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "scrape": "node scraper.js",
+    "postinstall": "npx playwright install --with-deps chromium"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.48.0",
+    "papaparse": "^5.4.1"
+  }
+}
